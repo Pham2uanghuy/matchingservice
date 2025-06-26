@@ -12,7 +12,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Service
-public class MatchingService implements TradeListener {
+public class MatchingService implements TradeListener, OrderListener {
 
     private final OrderBookEngine orderBookEngine;
     private final OrderBook orderBook; // Reference to OrderBook
@@ -23,9 +23,9 @@ public class MatchingService implements TradeListener {
         this.orderBook = new OrderBook(); // Initialize OrderBook
         this.orderBookEngine = new OrderBookEngine(this.orderBook); // Pass OrderBook to OrderBookEngine
         this.orderBookEngine.addTradeListener(this); // Register this service as a trade listener
+        this.orderBookEngine.addOrderListener(this); // Register this service as an order listener
         this.orderRepository = orderRepository;
         this.tradeRepository = tradeRepository;
-
         // Load open orders from DB into OrderBookEngine on startup (important for persistence)
         loadOpenOrdersIntoEngine();
     }
@@ -65,8 +65,8 @@ public class MatchingService implements TradeListener {
         tradeRepository.saveAll(trades);
         System.out.println("[MatchingService] Saved " + trades.size() + " trades to DB.");
 
-        // Update the final status of the order in DB after matching
-        return orderRepository.save(savedOrder); // Save the order again (its status might have changed)
+
+        return savedOrder;
     }
 
     /**
@@ -138,5 +138,10 @@ public class MatchingService implements TradeListener {
 
     public void printCurrentOrderBook() {
         orderBookEngine.printOrderBook();
+    }
+
+    @Override
+    public void onChange(Order order) {
+        orderRepository.save(order);
     }
 }

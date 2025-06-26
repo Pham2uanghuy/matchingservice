@@ -1,6 +1,7 @@
 package com.pqh.ms.service.engine;
 
 import com.pqh.ms.entity.*;
+import com.pqh.ms.service.impl.OrderListener;
 import com.pqh.ms.service.impl.TradeListener;
 
 import java.time.Instant;
@@ -12,11 +13,13 @@ public class OrderBookEngine {
     private final OrderBook orderBook;
     private final Map<String, Order> allOpenOrders; // Kept here for quick access and status management
     private final List<TradeListener> tradeListeners;
+    private final List<OrderListener> orderListeners;
 
     public OrderBookEngine(OrderBook orderBook) {
         this.orderBook = orderBook;
         this.allOpenOrders = new ConcurrentHashMap<>();
         this.tradeListeners = new ArrayList<>();
+        this.orderListeners = new ArrayList<>();
     }
 
     public void addTradeListener(TradeListener listener) {
@@ -25,6 +28,14 @@ public class OrderBookEngine {
 
     private void notifyTradeListeners(Trade trade) {
         tradeListeners.forEach(listener -> listener.onTrade(trade));
+    }
+
+    public void addOrderListener(OrderListener listener) {
+        orderListeners.add(listener);
+    }
+
+    public void notifyOrderListener(Order order) {
+        orderListeners.forEach(listener -> listener.onChange(order));
     }
 
     /**
@@ -122,7 +133,16 @@ public class OrderBookEngine {
                 notifyTradeListeners(trade);
 
                 newOrder.fill(tradeQuantity);
+                /**
+                 * Notify order listener to save new order status
+                 */
+                notifyOrderListener(newOrder);
+
                 restingOrder.fill(tradeQuantity);
+                /**
+                 * Notify order listener to save new status of restingOrder
+                 */
+                notifyOrderListener(restingOrder);
 
                 System.out.println("  Matched " + tradeQuantity + " at " + tradePrice + " (New " + side + " Order: " + newOrder.getRemainingQuantity() + " left, Resting " + (side == OrderSide.BUY ? "Ask" : "Bid") + ": " + restingOrder.getRemainingQuantity() + " left)");
 
