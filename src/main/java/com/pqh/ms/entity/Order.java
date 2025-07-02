@@ -56,16 +56,19 @@ public class Order {
     /**
      * BUY or SELL
      */
+    @Enumerated(EnumType.STRING)
     private OrderSide side;
 
     /**
      * @see OrderType
      */
+    @Enumerated(EnumType.STRING)
     private OrderType type;
 
     /**
      * @see OrderStatus
      */
+    @Enumerated(EnumType.STRING)
     private OrderStatus status;
 
     private Instant timestamp;
