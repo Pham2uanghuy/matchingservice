@@ -1,0 +1,62 @@
+
+services:
+  # Spring Boot Application (Build and Run)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080" # Your application's main port
+      - "9000:9000" # Optional: Debug port if needed
+    environment:
+      # Optional: Spring Boot profiles or other env vars
+      SPRING_PROFILES_ACTIVE: prod
+    depends_on:
+      - prometheus
+      - postgres
+      # - grafana # Grafana doesn't strictly depend on app, but good to link
+  # PostgreSQL Database Service
+  postgres:
+    image: postgres:13-alpine # Using a lightweight PostgreSQL image
+    container_name: matching-postgres
+    environment:
+      POSTGRES_DB: matchingservicedb # Database name
+      POSTGRES_USER: postgres     # Database username
+      POSTGRES_PASSWORD: 12345 # Database password
+    ports:
+      - "5432:5432" # Expose DB port to host (optional, for direct connection from host)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persistent storage for DB data
+  # Prometheus Service
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-server
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml # Mount Prometheus config
+      - prometheus_data:/prometheus # Persistent storage for Prometheus data
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  # Grafana Service
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-dashboard
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana # Persistent storage for Grafana data
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin # Change this for production!
+    depends_on:
+      - prometheus # Grafana needs Prometheus to query metrics
+
+volumes:
+  postgres_data: {}
+  prometheus_data: {}
+  grafana_data: {}
