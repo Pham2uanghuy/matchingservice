@@ -4,6 +4,8 @@ import com.pqh.ms.entity.*;
 import com.pqh.ms.repository.OrderRepository;
 import com.pqh.ms.repository.TradeRepository;
 import com.pqh.ms.service.engine.OrderBookEngine;
+import com.pqh.ms.service.kafka.OrderProducer;
+import com.pqh.ms.service.kafka.TradeEventProducer;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,11 +25,9 @@ public class MatchingService implements TradeListener, OrderListener {
     private final OrderRepository orderRepository;
     private final TradeRepository tradeRepository;
 
-    public MatchingService(OrderRepository orderRepository, TradeRepository tradeRepository) {
+    public MatchingService(OrderRepository orderRepository, TradeRepository tradeRepository, OrderProducer orderProducer, TradeEventProducer tradeEventProducer) {
         this.orderBook = new OrderBook(); // Initialize OrderBook
-        this.orderBookEngine = new OrderBookEngine(this.orderBook); // Pass OrderBook to OrderBookEngine
-        this.orderBookEngine.addTradeListener(this); // Register this service as a trade listener
-        this.orderBookEngine.addOrderListener(this); // Register this service as an order listener
+        this.orderBookEngine = new OrderBookEngine(this.orderBook, orderProducer, tradeEventProducer); // Pass OrderBook to OrderBookEngine
         this.orderRepository = orderRepository;
         this.tradeRepository = tradeRepository;
         // Load open orders from DB into OrderBookEngine on startup (important for persistence)
