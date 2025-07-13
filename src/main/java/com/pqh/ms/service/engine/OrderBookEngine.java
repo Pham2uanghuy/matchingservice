@@ -7,6 +7,9 @@ import com.pqh.ms.service.kafka.OrderProducer;
 import com.pqh.ms.service.kafka.TradeEventProducer;
 import com.pqh.ms.service.kafka.msg.OrderEvent;
 import com.pqh.ms.service.kafka.msg.TradeEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.RedisTemplate;
 
 import java.time.Instant;
 import java.util.*;
@@ -15,9 +18,12 @@ import  java.util.concurrent.atomic.AtomicBoolean;
 
 public class OrderBookEngine {
 
+    private static final Logger log = LoggerFactory.getLogger(OrderBookEngine.class);
+
     private final OrderBook orderBook;
     private final Map<String, Order> allOpenOrders; // Kept here for quick access and status management
-    private final List<TradeListener> tradeListeners;
+
+    //field for kafka
     private final OrderProducer orderProducer;
     private final TradeEventProducer tradeEventProducer;
 
@@ -27,12 +33,17 @@ public class OrderBookEngine {
     private final AtomicBoolean isRunning; // To control the matching loop
 
 
-    public OrderBookEngine(OrderBook orderBook, OrderProducer orderProducer, TradeEventProducer tradeEventProducer) {
+    //fields for redis
+    private final RedisTemplate<String, Object> redisTemplate;
+    private static final String REDIS_ORDER_KEY_PREFIX = "order:"; // Redis key prefix for orders
+
+
+    public OrderBookEngine(OrderBook orderBook, OrderProducer orderProducer, TradeEventProducer tradeEventProducer, RedisTemplate<String, Object> redisTemplate) {
         this.orderBook = orderBook;
         this.orderProducer = orderProducer;
         this.tradeEventProducer = tradeEventProducer;
-        this.allOpenOrders = new ConcurrentHashMap<>();
-        this.tradeListeners = Collections.synchronizedList(new ArrayList<>()); // Make listeners thread-safe
+        this.redisTemplate = redisTemplate;
+        this.allOpenOrders = new ConcurrentHashMap<>();// Make listeners thread-safe
 
         // Use a single-threaded executor for sequential processing of orders
         this.matchingExecutor = Executors.newSingleThreadExecutor();
@@ -46,12 +57,12 @@ public class OrderBookEngine {
      */
     private void startMatchingThread() {
         matchingExecutor.submit(() -> {
-            System.out.println("[OrderBookEngine] Matching thread started.");
+            log.info("[OrderBookEngine] Matching thread started.");
             while (isRunning.get() || !incomingOrderQueue.isEmpty()) { // Keep running if active or queue has orders
                 try {
                     Order newOrder = incomingOrderQueue.poll(); // Get order from queue
                     if (newOrder != null) {
-                        System.out.println("[OrderBookEngine] Processing order from queue: " + newOrder.getOrderId());
+                        log.info("[OrderBookEngine] Processing order from queue: {}", newOrder.getOrderId());
                         processOrderInternal(newOrder); // Process the order
                     } else {
                         // If no orders, sleep briefly to avoid busy-waiting
@@ -59,14 +70,13 @@ public class OrderBookEngine {
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt(); // Restore interrupt status
-                    System.err.println("[OrderBookEngine] Matching thread interrupted, shutting down: " + e.getMessage());
+                    log.error("[OrderBookEngine] Matching thread interrupted, shutting down: {}", e.getMessage());
                     isRunning.set(false); // Signal to stop processing
                 } catch (Exception e) {
-                    System.err.println("[OrderBookEngine] Error processing order in matching thread: " + e.getMessage());
-                    e.printStackTrace();
+                    log.error("[OrderBookEngine] Error processing order in matching thread: {}", e.getMessage(), e);
                 }
             }
-            System.out.println("[OrderBookEngine] Matching thread stopped gracefully.");
+            log.info("[OrderBookEngine] Matching thread stopped gracefully.");
         });
     }
 
@@ -75,24 +85,24 @@ public class OrderBookEngine {
      * This method should be called when the application is shutting down.
      */
     public void shutdown() {
-        System.out.println("[OrderBookEngine] Initiating shutdown...");
+        log.info("[OrderBookEngine] Initiating shutdown...");
         isRunning.set(false); // Signal the matching thread to stop after processing current queue
         matchingExecutor.shutdown(); // Disable new tasks from being submitted
         try {
             // Wait a while for existing tasks (orders in queue) to terminate
             if (!matchingExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-                System.err.println("[OrderBookEngine] Matching engine did not terminate gracefully within 30s. Forcing shutdown.");
+                log.error("[OrderBookEngine] Matching engine did not terminate gracefully within 30s. Forcing shutdown.");
                 matchingExecutor.shutdownNow(); // Forcefully terminate if it takes too long
                 // Wait a bit more for tasks to respond to being cancelled
                 if (!matchingExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-                    System.err.println("[OrderBookEngine] Matching engine did not terminate after forceful shutdown.");
+                    log.error("[OrderBookEngine] Matching engine did not terminate after forceful shutdown.");
                 }
             }
-            System.out.println("[OrderBookEngine] Matching engine shutdown complete.");
+            log.info("[OrderBookEngine] Matching engine shutdown complete.");
         } catch (InterruptedException ie) {
             matchingExecutor.shutdownNow();
             Thread.currentThread().interrupt(); // Preserve interrupt status
-            System.err.println("[OrderBookEngine] Shutdown interrupted.");
+            log.error("[OrderBookEngine] Shutdown interrupted.");
         }
     }
 
@@ -123,11 +133,19 @@ public class OrderBookEngine {
         if (order.getRemainingQuantity() <= 0 &&
                 order.getStatus() != OrderStatus.OPEN &&
                 order.getStatus() != OrderStatus.PARTIALLY_FILLED) {
+            log.warn("[OrderBookEngine] Attempted to add invalid resting order: {} (Qty: {}, Status: {})",
+                    order.getOrderId(), order.getRemainingQuantity(), order.getStatus());
             return; // Only add valid open/partially filled orders as resting
         }
         orderBook.addOrder(order);
         allOpenOrders.put(order.getOrderId(), order);
-        System.out.println("[OrderBookEngine] Added resting order: " + order.getOrderId() + " " + order.getSide() + " " + order.getRemainingQuantity() + "@" + order.getPrice());
+        log.info("[OrderBookEngine] Added resting order: {} {} {}@{}",
+                order.getOrderId(), order.getSide(), order.getRemainingQuantity(), order.getPrice());
+
+        // Persist to Redis
+        redisTemplate.opsForValue().set(REDIS_ORDER_KEY_PREFIX + order.getOrderId(), order);
+        log.info("[OrderBookEngine] Added resting order: {} {} {}@{} and saved to Redis.",
+                order.getOrderId(), order.getSide(), order.getRemainingQuantity(), order.getPrice());
     }
 
     /**
@@ -137,7 +155,18 @@ public class OrderBookEngine {
     public void addToOrderQueue(Order newOrder) {
         // Add order to the concurrent queue. This method returns immediately.
         incomingOrderQueue.offer(newOrder);
-        System.out.println("[OrderBookEngine] Enqueued new order: " + newOrder.getOrderId() + " (Side: " + newOrder.getSide() + ", Qty: " + newOrder.getOriginalQuantity() + ", Price: " + newOrder.getPrice() + ")");
+        // Save initial state to Redis when enqueued
+        // New Order was already saved to DB, this is for the in-memory engine's perspective
+        // We ensure it's in Redis *if* it's an open order.
+        if (newOrder.getStatus() == OrderStatus.OPEN ||
+                newOrder.getStatus() == OrderStatus.PARTIALLY_FILLED) {
+            redisTemplate.opsForValue().set(
+                    REDIS_ORDER_KEY_PREFIX + newOrder.getOrderId(),
+                    newOrder);
+            log.debug("[OrderBookEngine] Initial state of order {} saved to Redis.", newOrder.getOrderId());
+        }
+        log.info("[OrderBookEngine] Enqueued new order: {} (Side: {}, Qty: {}, Price: {})",
+                newOrder.getOrderId(), newOrder.getSide(), newOrder.getOriginalQuantity(), newOrder.getPrice());
     }
 
     /**
@@ -146,7 +175,8 @@ public class OrderBookEngine {
      */
     private void processOrderInternal(Order newOrder) {
         List<Trade> trades = new ArrayList<>(); // Collect trades generated by this order
-        System.out.println("[OrderBookEngine] Matching order: " + newOrder.getOrderId() + " " + newOrder.getSide() + " " + newOrder.getOriginalQuantity() + "@" + newOrder.getPrice());
+        log.info("[OrderBookEngine] Matching order: {} {} {}@{}",
+                newOrder.getOrderId(), newOrder.getSide(), newOrder.getOriginalQuantity(), newOrder.getPrice());
 
         if (newOrder.getSide() == OrderSide.BUY) {
             // new order's final status was updated inside process function
@@ -167,16 +197,20 @@ public class OrderBookEngine {
 
             // Match if new buy order price >= best ask price
             if (newOrder.getPrice() >= askPrice) {
+                log.debug("  Attempting to match buy order {} with ask level at price {}", newOrder.getOrderId(), askPrice);
                 processLevel(newOrder, restingAsks, askPrice, trades, OrderSide.BUY);
                 if (restingAsks.isEmpty()) {
                     askIter.remove(); // Remove price level if empty. Safe with Iterator.
+                    log.debug("  Ask level at price {} is now empty and removed.", askPrice);
                 }
             } else {
+                log.debug("  Buy order {} price {} is lower than best ask price {}, breaking matching.", newOrder.getOrderId(), newOrder.getPrice(), askPrice);
                 break; // No more matching opportunities at better prices
             }
         }
         if (newOrder.getRemainingQuantity() > 0) {
             addRestingOrder(newOrder); // Add remaining quantity as a resting order
+            log.info("  New buy order {} has remaining quantity {} and added as resting order.", newOrder.getOrderId(), newOrder.getRemainingQuantity());
         }
     }
 
@@ -190,16 +224,20 @@ public class OrderBookEngine {
 
             // Match if new sell order price <= best bid price
             if (newOrder.getPrice() <= bidPrice) {
+                log.debug("  Attempting to match sell order {} with bid level at price {}", newOrder.getOrderId(), bidPrice);
                 processLevel(newOrder, restingBids, bidPrice, trades, OrderSide.SELL);
                 if (restingBids.isEmpty()) {
                     bidIter.remove(); // Remove price level if empty. Safe with Iterator.
+                    log.debug("  Bid level at price {} is now empty and removed.", bidPrice);
                 }
             } else {
+                log.debug("  Sell order {} price {} is higher than best bid price {}, breaking matching.", newOrder.getOrderId(), newOrder.getPrice(), bidPrice);
                 break; // No more matching opportunities at better prices
             }
         }
         if (newOrder.getRemainingQuantity() > 0) {
             addRestingOrder(newOrder); // Add remaining quantity as a resting order
+            log.info("  New sell order {} has remaining quantity {} and added as resting order.", newOrder.getOrderId(), newOrder.getRemainingQuantity());
         }
     }
 
@@ -218,21 +256,39 @@ public class OrderBookEngine {
                     Trade trade = createTrade(newOrder, restingOrder, tradePrice, tradeQuantity, side);
                     trades.add(trade); // Add to local list of trades
                     notifyTradeListeners(trade); // **Notify listener immediately about the trade**
+                    log.debug("  Trade created: quantity={}, price={}", tradeQuantity, tradePrice);
 
                     newOrder.fill(tradeQuantity); // update newOrder status
-                    notifyOrderListener(newOrder); // **Notify listener to save new order status for newOrder to DB
+                    notifyOrderListener(newOrder); // send msg to kafka to save new order status for newOrder to DB
+                    // Update newOrder in Redis
+                    redisTemplate.opsForValue().set(
+                            REDIS_ORDER_KEY_PREFIX + newOrder.getOrderId(),
+                            newOrder);
+                    log.debug("  New order {} filled by {} quantity, remaining {}. Status updated in Redis.",
+                            newOrder.getOrderId(), tradeQuantity, newOrder.getRemainingQuantity());
+
 
                     restingOrder.fill(tradeQuantity); // update restingOrder status
-                    notifyOrderListener(restingOrder); // **Notify listener to save new status of restingOrder to DB
+                    notifyOrderListener(restingOrder); // send msg to kafka to save new status of restingOrder to DB
+                    // Update restingOrder in Redis
+                    redisTemplate.opsForValue().set(
+                            REDIS_ORDER_KEY_PREFIX + restingOrder.getOrderId(),
+                            restingOrder);
+                    log.debug("  Resting order {} filled by {} quantity, remaining {}. Status updated in Redis.",
+                            restingOrder.getOrderId(), tradeQuantity, restingOrder.getRemainingQuantity());
 
-                    System.out.println("  Matched " + tradeQuantity + " at " + String.format("%.2f", tradePrice) +
-                            " (New " + side + " Order: " + String.format("%.2f", newOrder.getRemainingQuantity()) + " left, Resting " +
-                            (side == OrderSide.BUY ? "Ask" : "Bid") + ": " + String.format("%.2f", restingOrder.getRemainingQuantity()) + " left)");
+
+                    log.info("  Matched {} at {:.2f} (New {} Order: {:.2f} left, Resting {}: {:.2f} left)",
+                            tradeQuantity, tradePrice, side, newOrder.getRemainingQuantity(),
+                            (side == OrderSide.BUY ? "Ask" : "Bid"), restingOrder.getRemainingQuantity());
 
                     if (restingOrder.getStatus() == OrderStatus.FILLED) {
                         restingIter.remove();
                         allOpenOrders.remove(restingOrder.getOrderId()); // Remove from global map
-                        System.out.println("  Resting " + (side == OrderSide.BUY ? "Ask" : "Bid") + " " + restingOrder.getOrderId() + " FILLED.");
+                        // Remove filled order from Redis
+                        redisTemplate.delete(REDIS_ORDER_KEY_PREFIX + restingOrder.getOrderId());
+                        log.info("  Resting {} {} FILLED and removed from order book and Redis.",
+                                (side == OrderSide.BUY ? "Ask" : "Bid"), restingOrder.getOrderId());
                     }
                 }
             }
@@ -268,44 +324,68 @@ public class OrderBookEngine {
                 orderBook.removeOrder(orderToCancel);
                 orderToCancel.setStatus(OrderStatus.CANCELED);
                 allOpenOrders.remove(orderId);
+                // Update status in Redis to CANCELED, or remove it as it's no longer 'open'
+                redisTemplate.delete(REDIS_ORDER_KEY_PREFIX + orderId);
                 notifyOrderListener(orderToCancel); // Notify listeners about cancellation
-                System.out.println("[OrderBookEngine] Order " + orderId + " has been CANCELED by matching thread.");
+                log.info("[OrderBookEngine] Order {} has been CANCELED by matching thread.", orderId);
             } else {
-                System.out.println("[OrderBookEngine] Order " + orderId + " not found or cannot be canceled (current status: " + (orderToCancel != null ? orderToCancel.getStatus() : "null") + ").");
+                log.warn("[OrderBookEngine] Order {} not found or cannot be canceled (current status: {}).",
+                        orderId, (orderToCancel != null ? orderToCancel.getStatus() : "null"));
             }
         });
-        System.out.println("[OrderBookEngine] Cancellation request for order " + orderId + " enqueued.");
+        log.info("[OrderBookEngine] Cancellation request for order {} enqueued.", orderId);
     }
 
     public Order getOrderById(String orderId) {
-        // This is a read operation on ConcurrentHashMap, which is thread-safe.
-        return allOpenOrders.get(orderId);
+        // First try to get from in-memory map
+        Order order = allOpenOrders.get(orderId);
+        if (order != null) {
+            log.debug("[OrderBookEngine] Order {} found in in-memory map.", orderId);
+            return order;
+        }
+        // If not in memory (e.g., after a restart and before initial load completes), try Redis
+        // This is primarily for resilience/debug and not main path for active orders
+        log.debug("[OrderBookEngine] Order {} not found in in-memory map, attempting to retrieve from Redis.", orderId);
+        return (Order) redisTemplate.opsForValue().get(REDIS_ORDER_KEY_PREFIX + orderId);
     }
 
     public List<Order> getAllOpenOrders() {
         // Return a copy to prevent ConcurrentModificationException if the underlying map changes
         // while an external thread is iterating over the returned list.
+        log.debug("[OrderBookEngine] Retrieving all open orders from in-memory map.");
         return new ArrayList<>(allOpenOrders.values());
     }
 
     public BBO getBBO() {
         // BBO retrieval uses ConcurrentSkipListMap's firstEntry, which is thread-safe.
+        log.debug("[OrderBookEngine] Retrieving Best Bid Offer (BBO).");
         return orderBook.getBBO();
     }
 
     public void printOrderBook() {
         // Printing iterates over ConcurrentSkipListMap, which provides weakly consistent iterators.
         // This is fine for a diagnostic print.
-        orderBook.printOrderBook();
+        log.info("[OrderBookEngine] Printing current state of the Order Book:");
+        orderBook.printOrderBook(); // Assuming printOrderBook method in OrderBook class uses logging too
     }
 
+    /**
+     * Resets the order book, clearing both in-memory and Redis data.
+     */
     public void reset() {
-        // To reset, we should stop the processing thread, clear data, and then potentially restart.
-        System.out.println("[OrderBookEngine] Resetting Order Book (clearing data, but matching thread continues).");
-        // Clear the queue first to discard pending orders
+        log.warn("[OrderBookEngine] Resetting Order Book (clearing data, but matching thread continues).");
         incomingOrderQueue.clear();
         orderBook.clear();
         allOpenOrders.clear();
-        System.out.println("[OrderBookEngine] Order Book data cleared.");
+        // Clear all relevant order data from Redis as well
+        // This can be slow if there are many keys. For a production system, consider a more targeted cleanup.
+        Set<String> keys = redisTemplate.keys(REDIS_ORDER_KEY_PREFIX + "*");
+        if (keys != null && !keys.isEmpty()) {
+            redisTemplate.delete(keys);
+            log.info("[OrderBookEngine] Cleared {} orders from Redis.", keys.size());
+        } else {
+            log.info("[OrderBookEngine] No orders found in Redis to clear with prefix {}.", REDIS_ORDER_KEY_PREFIX);
+        }
+        log.warn("[OrderBookEngine] Order Book data cleared.");
     }
 }
