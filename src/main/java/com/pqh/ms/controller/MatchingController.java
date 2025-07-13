@@ -4,7 +4,8 @@ import com.pqh.ms.entity.BBO;
 import com.pqh.ms.entity.Order;
 import com.pqh.ms.entity.Trade;
 import com.pqh.ms.service.impl.MatchingService;
-import org.springframework.http.HttpStatus;
+import com.pqh.ms.service.kafka.OrderProducer;
+import com.pqh.ms.service.kafka.msg.OrderEvent;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -14,10 +15,13 @@ import java.util.List;
 @RequestMapping("/api/orders")
 public class MatchingController {
 
-    private final MatchingService matchingService;
+   private final MatchingService matchingService;
 
-    public MatchingController(MatchingService matchingService) {
+   private final OrderProducer orderProducer;
+
+    public MatchingController(MatchingService matchingService, OrderProducer orderProducer) {
         this.matchingService = matchingService;
+        this.orderProducer = orderProducer;
     }
 
     /**
@@ -25,11 +29,22 @@ public class MatchingController {
      * Request Body: JSON representation of an Order (price, quantity, side, instrumentId, userId)
      * Response: The updated Order entity with its ID and current status.
      */
+//    @PostMapping
+//    public ResponseEntity<Order> placeOrder(@RequestBody Order order) {
+//        // Validate input 'order' if necessary (e.g., price > 0, quantity > 0)
+//        Order processedOrder = matchingService.placeOrder(order);
+//        return ResponseEntity.status(HttpStatus.CREATED).body(processedOrder);
+//    }
     @PostMapping
-    public ResponseEntity<Order> placeOrder(@RequestBody Order order) {
+    public String  placeOrder(@RequestBody Order order) {
         // Validate input 'order' if necessary (e.g., price > 0, quantity > 0)
-        Order processedOrder = matchingService.placeOrder(order);
-        return ResponseEntity.status(HttpStatus.CREATED).body(processedOrder);
+        OrderEvent orderEvent = new OrderEvent();
+        orderEvent.setStatus("PENDING");
+        orderEvent.setMessage("an order placed");
+        orderEvent.setOrder(order);
+
+        orderProducer.sendOrderCommand(orderEvent);
+        return "Placed order successfully";
     }
 
     /**

@@ -3,6 +3,10 @@ package com.pqh.ms.service.engine;
 import com.pqh.ms.entity.*;
 import com.pqh.ms.service.impl.OrderListener;
 import com.pqh.ms.service.impl.TradeListener;
+import com.pqh.ms.service.kafka.OrderProducer;
+import com.pqh.ms.service.kafka.TradeEventProducer;
+import com.pqh.ms.service.kafka.msg.OrderEvent;
+import com.pqh.ms.service.kafka.msg.TradeEvent;
 
 import java.time.Instant;
 import java.util.*;
@@ -14,18 +18,21 @@ public class OrderBookEngine {
     private final OrderBook orderBook;
     private final Map<String, Order> allOpenOrders; // Kept here for quick access and status management
     private final List<TradeListener> tradeListeners;
-    private final List<OrderListener> orderListeners;
+    private final OrderProducer orderProducer;
+    private final TradeEventProducer tradeEventProducer;
 
     //fields for multi-threading
     private final ExecutorService matchingExecutor; // For sequential matching of all orders
     private final ConcurrentLinkedQueue<Order> incomingOrderQueue; // Queue for new orders
     private final AtomicBoolean isRunning; // To control the matching loop
 
-    public OrderBookEngine(OrderBook orderBook) {
+
+    public OrderBookEngine(OrderBook orderBook, OrderProducer orderProducer, TradeEventProducer tradeEventProducer) {
         this.orderBook = orderBook;
+        this.orderProducer = orderProducer;
+        this.tradeEventProducer = tradeEventProducer;
         this.allOpenOrders = new ConcurrentHashMap<>();
         this.tradeListeners = Collections.synchronizedList(new ArrayList<>()); // Make listeners thread-safe
-        this.orderListeners = Collections.synchronizedList(new ArrayList<>()); // Make listeners thread-safe
 
         // Use a single-threaded executor for sequential processing of orders
         this.matchingExecutor = Executors.newSingleThreadExecutor();
@@ -89,20 +96,23 @@ public class OrderBookEngine {
         }
     }
 
-    public void addTradeListener(TradeListener listener) {
-        tradeListeners.add(listener);
-    }
 
     private void notifyTradeListeners(Trade trade) {
-        tradeListeners.forEach(listener -> listener.onTrade(trade));
+        TradeEvent tradeEvent = new TradeEvent();
+        tradeEvent.setStatus("PENDING");
+        tradeEvent.setMessage("save trade");
+        tradeEvent.setTrade(trade);
+        tradeEventProducer.sendTrade(tradeEvent);
     }
 
-    public void addOrderListener(OrderListener listener) {
-        orderListeners.add(listener);
-    }
+
 
     public void notifyOrderListener(Order order) {
-        orderListeners.forEach(listener -> listener.onChange(order));
+        OrderEvent orderEvent = new OrderEvent();
+        orderEvent.setStatus("PENDING");
+        orderEvent.setMessage("update order status");
+        orderEvent.setOrder(order);
+        orderProducer.sendOrderStatusUpdate(orderEvent);
     }
 
     /**
