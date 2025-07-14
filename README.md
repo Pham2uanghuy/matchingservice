@@ -37,7 +37,7 @@ Kafka is used as a messaging layer between components:
 - 
 Kafka enables asynchronous, decoupled processing between layers.
 
-###Redis
+### Redis
 
 Redis acts as a cache between the matching service and the database.
 The MatchingService does not interact directly with PostgreSQL.
@@ -47,7 +47,7 @@ Responsibilities:
 - Update cache on order status and trade when matching
 - Support read-through and write-through caching
 
-##PostgreSQL
+### PostgreSQL
 PostgreSQL is used for persistent storage:
 - Order history
 - Trade logs
