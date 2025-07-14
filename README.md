@@ -1,4 +1,4 @@
-# Matching Service - Order Book Engine (Java + Spring Boot)
+# Matching Order Service - Order Book Engine (Java + Spring Boot)
 
 This service implements a basic **Order Matching Engine** for a centralized exchange (CEX), inspired by [philipperemy/Order-Book-Matching-Engine](https://github.com/philipperemy/Order-Book-Matching-Engine).
 
